@@ -20,6 +20,7 @@
 #define _WIN32_WINNT 0x0601
 #define WINVER 0x0601
 #include <windows.h>
+#include <windowsx.h>
 #include <bcrypt.h>
 #include <cfgmgr32.h>
 #include <stdio.h>
@@ -33,7 +34,7 @@ DEFINE_GUID(GUID_DEVINTERFACE_DISK,
     0x53f56307L, 0xb6bf, 0x11d0, 0x94, 0xd2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b);
 
 #define APP_NAME     L"USB_safely"
-#define APP_VER      L"V2.0.2"
+#define APP_VER      L"V2.1.0"
 #define TEAM_NAME    L"APPLE_INT · Geek-Hub"
 #define MAX_PWD      500      /* 密钥模式上限（DESIGN.md 第三节） */
 
@@ -308,23 +309,97 @@ static const wchar_t *ROWS[4] = {
 static void InputAppend(wchar_t c)
 {
     if (!ModeAllowChar(g_state.mode, c)) return;   /* 模式过滤兜底（v2.0.2） */
-    if (g_inputLen < MAX_PWD) { g_input[g_inputLen++] = c; g_input[g_inputLen] = 0; InvalidateRect(g_hDisplay, NULL, TRUE); }
+    if (g_inputLen < MAX_PWD) { g_input[g_inputLen++] = c; g_input[g_inputLen] = 0; InvalidateRect(g_hLockWnd, NULL, FALSE); }
 }
 static void InputBack(void)
 {
-    if (g_inputLen > 0) { g_inputLen--; g_input[g_inputLen] = 0; InvalidateRect(g_hDisplay, NULL, TRUE); }
+    if (g_inputLen > 0) { g_inputLen--; g_input[g_inputLen] = 0; InvalidateRect(g_hLockWnd, NULL, FALSE); }
 }
 static void InputClear(void)
 {
-    g_inputLen = 0; g_input[0] = 0; InvalidateRect(g_hDisplay, NULL, TRUE);
+    g_inputLen = 0; g_input[0] = 0; InvalidateRect(g_hLockWnd, NULL, FALSE);
 }
 
-static void SetButtonsEnabled(HWND wnd, BOOL en)
+/* ---------------- v2.1.0 现代化 UI：自绘控件 + 双缓冲 ---------------- */
+#define CLR_BG_TOP     RGB(22, 28, 46)    /* 背景渐变顶部（深蓝，非纯黑） */
+#define CLR_BG_BOTTOM  RGB(48, 38, 78)    /* 背景渐变底部（紫） */
+#define CLR_ACCENT     RGB(76, 194, 255)  /* 主色 #4CC2FF（与 Geek-Hub 同源） */
+#define CLR_KEY_FILL   RGB(36, 46, 70)
+#define CLR_KEY_HOVER  RGB(54, 70, 104)
+#define CLR_KEY_EDGE   RGB(66, 86, 124)
+#define CLR_TEXT       RGB(232, 240, 252)
+#define CLR_SUBTEXT    RGB(138, 156, 190)
+#define CLR_DANGER     RGB(248, 113, 113)
+#define CLR_WARN       RGB(250, 190, 120)
+
+typedef struct { RECT r; int ch; } VKEY;          /* ch=-1 为退格 */
+static VKEY  g_vk[48];
+static int   g_vkCount = 0;
+static RECT  g_rcDisplay, g_rcBack, g_rcConfirm, g_rcCancel;
+static int   g_hoverKey = -1, g_hoverBtn = 0;     /* 0无 1确认 2取消 3退格 */
+
+/* 垂直渐变填充（msimg32） */
+static void FillVGrad(HDC dc, RECT rc, COLORREF c1, COLORREF c2)
 {
-    for (int i = 0; i < g_keyCount; i++) if (g_keys[i]) EnableWindow(g_keys[i], en);
-    HWND c = GetDlgItem(wnd, IDC_CONFIRM), x = GetDlgItem(wnd, IDC_CANCEL);
-    if (c) EnableWindow(c, en);
-    if (x) EnableWindow(x, en);
+    TRIVERTEX tv[2] = {
+        { rc.left,  rc.top,    (USHORT)(GetRValue(c1) << 8), (USHORT)(GetGValue(c1) << 8), (USHORT)(GetBValue(c1) << 8), 0 },
+        { rc.right, rc.bottom, (USHORT)(GetRValue(c2) << 8), (USHORT)(GetGValue(c2) << 8), (USHORT)(GetBValue(c2) << 8), 0 }
+    };
+    GRADIENT_RECT gr = { 0, 1 };
+    GradientFill(dc, tv, 2, &gr, 1, GRADIENT_FILL_RECT_V);
+}
+
+/* 圆角矩形（填充+描边） */
+static void RoundedBox(HDC dc, RECT r, int rad, COLORREF fill, COLORREF border, int penw)
+{
+    HBRUSH b = (fill == -1) ? (HBRUSH)GetStockObject(NULL_BRUSH) : CreateSolidBrush(fill);
+    HPEN  p = (border == -1) ? (HPEN)GetStockObject(NULL_PEN) : CreatePen(PS_SOLID, penw, border);
+    HBRUSH ob = (HBRUSH)SelectObject(dc, b);
+    HPEN  op = (HPEN)SelectObject(dc, p);
+    RoundRect(dc, r.left, r.top, r.right + 1, r.bottom + 1, rad, rad);
+    SelectObject(dc, ob); SelectObject(dc, op);
+    if (fill != -1) DeleteObject(b);
+    if (border != -1) DeleteObject(p);
+}
+
+/* v2.1.0 共用：现代窗口消息（渐变背景 / 透明文字 / 深色输入框 / 自绘按钮） */
+static HBRUSH g_hEditBrush = NULL;
+static LRESULT ModernErase(HWND wnd, HDC dc)
+{
+    RECT rc; GetClientRect(wnd, &rc);
+    FillVGrad(dc, rc, RGB(26, 32, 52), RGB(44, 38, 68));
+    return 1;
+}
+static LRESULT ModernStatic(HDC dc)
+{
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, CLR_TEXT);
+    return (LRESULT)GetStockObject(NULL_BRUSH);
+}
+static LRESULT ModernEdit(HDC dc)
+{
+    if (!g_hEditBrush) g_hEditBrush = CreateSolidBrush(RGB(30, 38, 60));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, CLR_TEXT);
+    return (LRESULT)g_hEditBrush;
+}
+static BOOL ModernBtnDraw(DRAWITEMSTRUCT *dis, COLORREF fill, COLORREF border, COLORREF textc)
+{
+    BOOL down = (dis->itemState & ODS_SELECTED) != 0;
+    BOOL off  = (dis->itemState & ODS_DISABLED)  != 0;
+    RoundedBox(dis->hDC, dis->rcItem, 14,
+               off ? RGB(30, 36, 54) : (down ? RGB(22, 28, 46) : fill),
+               off ? RGB(44, 52, 74) : border, 1);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, off ? RGB(80, 92, 116) : textc);
+    HFONT f = CreateFontW(16, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+            0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    HFONT of = (HFONT)SelectObject(dis->hDC, f);
+    WCHAR txt[96]; GetWindowTextW(dis->hwndItem, txt, 96);
+    DrawTextW(dis->hDC, txt, -1, &dis->rcItem, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(dis->hDC, of);
+    DeleteObject(f);
+    return TRUE;
 }
 
 /* 格式化兜底（DESIGN.md 第四节，默认关闭，需超级模式开启） */
@@ -334,7 +409,6 @@ static void TriggerFormat(HWND wnd)
         /* 未开启格式化 → 上限锁定 120 分钟，防无限增长 */
         g_state.lockUntil = (long long)time(NULL) + 7200;
         SaveState();
-        SetButtonsEnabled(wnd, FALSE);
         return;
     }
     MessageBoxW(wnd,
@@ -360,7 +434,6 @@ static void OnWrongPassword(HWND wnd)
     if (g_state.fails % 5 == 0) {
         /* 递进锁定：每 5 次 → (次数÷5)×10 分钟（DESIGN.md 第四节） */
         g_state.lockUntil = (long long)now + (long long)(g_state.fails / 5) * 600;
-        SetButtonsEnabled(wnd, FALSE);
     }
     SaveState();
     InvalidateRect(wnd, NULL, TRUE);
@@ -377,156 +450,195 @@ static void UnlockSuccess(HWND wnd)
     DestroyWindow(wnd);   /* WM_DESTROY 中转入托盘待命 */
 }
 
-static void BuildKeyboard(HWND parent)
-{
-    g_keyCount = 0;
-    for (int r = 0; r < 4; r++) {
-        int n = (int)wcslen(ROWS[r]);
-        for (int c = 0; c < n; c++) {
-            wchar_t label[2] = { ROWS[r][c], 0 };
-            HWND b = CreateWindowW(L"BUTTON", label,
-                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    0, 0, 10, 10, parent,
-                    (HMENU)(INT_PTR)(IDC_KEYBASE + g_keyCount), g_hInst, NULL);
-            SendMessageW(b, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-            g_keys[g_keyCount] = b;
-            g_keyChar[g_keyCount] = ROWS[r][c];
-            g_keyCount++;
-        }
-    }
-    /* 全局唯一一个退格键，放在最后一行末尾（v2.0.1 曾每行一个，共 4 个，属 bug） */
-    HWND bs = CreateWindowW(L"BUTTON", L"⌫",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            0, 0, 10, 10, parent, (HMENU)(INT_PTR)IDC_BACKSPACE, g_hInst, NULL);
-    SendMessageW(bs, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-    g_keys[g_keyCount] = bs;
-    g_keyChar[g_keyCount] = -1;
-    g_keyCount++;
-}
-
-/* 按解锁模式显示/隐藏按键：数字模式只见数字、字母模式只见字母（v2.0.2） */
-static void ApplyModeToKeys(void)
-{
-    for (int i = 0; i < g_keyCount; i++) {
-        if (!g_keys[i]) continue;
-        int ch = g_keyChar[i];
-        BOOL show = (ch == -1) ? TRUE : ModeAllowChar(g_state.mode, (wchar_t)ch);
-        ShowWindow(g_keys[i], show ? SW_SHOW : SW_HIDE);
-    }
-}
-
-static void LayoutLock(HWND wnd)
+/* 计算锁屏全部自绘元素的布局（按键按解锁模式过滤，退格键全局唯一） */
+static void BuildLockLayout(HWND wnd)
 {
     RECT rc; GetClientRect(wnd, &rc);
     int W = rc.right, H = rc.bottom;
-    int kbW = W < 900 ? W - 40 : 860;
-    int kbH = H / 2;
+
+    /* 收集当前模式允许的字符键 */
+    int chars[40], n = 0;
+    for (int r = 0; r < 4; r++) {
+        int len = (int)wcslen(ROWS[r]);
+        for (int c = 0; c < len; c++)
+            if (ModeAllowChar(g_state.mode, ROWS[r][c]) && n < 40)
+                chars[n++] = ROWS[r][c];
+    }
+
+    int cols = n > 10 ? 10 : (n > 0 ? n : 1);
+    int rows = (n + cols - 1) / cols;
+    int gap = 10;
+    int kbW = W < 820 ? W - 60 : 760;
+    int kbH = rows * 58 + (rows - 1) * gap;
+    if (kbH > H / 2) { kbH = H / 2; }
+    int bw = (kbW - (cols - 1) * gap) / cols;
+    int bh = kbH / rows - gap;
+    if (bh > 52) bh = 52;
     int x0 = (W - kbW) / 2;
-    int y0 = H - kbH - 30;
-    int cols = 10, rows = 4;
-    int bw = kbW / cols - 8, bh = kbH / rows - 8;
-    int i = 0;
-    for (int r = 0; r < rows; r++)
-        for (int c = 0; c < cols; c++) {
-            if (i >= g_keyCount) break;
-            SetWindowPos(g_keys[i], NULL,
-                x0 + c * (bw + 8), y0 + r * (bh + 8), bw, bh, SWP_NOZORDER);
-            i++;
-        }
-    if (g_hDisplay) SetWindowPos(g_hDisplay, NULL, x0, y0 - 130, kbW, 60, SWP_NOZORDER);
-    HWND hC = GetDlgItem(wnd, IDC_CONFIRM), hX = GetDlgItem(wnd, IDC_CANCEL);
-    if (hC) SetWindowPos(hC, NULL, W / 2 - 170, y0 - 55, 160, 40, SWP_NOZORDER);
-    if (hX) SetWindowPos(hX, NULL, W / 2 + 10,  y0 - 55, 160, 40, SWP_NOZORDER);
+    int y0 = H - kbH - 26;
+
+    g_vkCount = 0;
+    for (int i = 0; i < n; i++) {
+        int r = i / cols, c = i % cols;
+        g_vk[g_vkCount].r.left   = x0 + c * (bw + gap);
+        g_vk[g_vkCount].r.top    = y0 + r * (bh + gap);
+        g_vk[g_vkCount].r.right  = g_vk[g_vkCount].r.left + bw;
+        g_vk[g_vkCount].r.bottom = g_vk[g_vkCount].r.top + bh;
+        g_vk[g_vkCount].ch = chars[i];
+        g_vkCount++;
+    }
+
+    /* 密码显示框 + 退格键（显示框右侧） */
+    int dispH = 52;
+    SetRect(&g_rcDisplay, x0, y0 - dispH - 16, x0 + kbW - 66, y0 - 16);
+    SetRect(&g_rcBack,    x0 + kbW - 58, y0 - dispH - 16, x0 + kbW, y0 - 16);
+
+    /* 确认 / 取消按钮 */
+    int btnY = g_rcDisplay.top - 62, btnW = 190, btnH = 46;
+    int totalW = btnW * 2 + 24;
+    int bx = (W - totalW) / 2;
+    SetRect(&g_rcConfirm, bx, btnY, bx + btnW, btnY + btnH);
+    SetRect(&g_rcCancel,  bx + btnW + 24, btnY, bx + btnW * 2 + 24, btnY + btnH);
 }
 
-static void PaintLock(HWND wnd, HDC dc)
+/* 命中测试：返回键索引；按钮用 g_hoverBtn（1确认 2取消 3退格） */
+static int HitKey(int x, int y)
 {
-    RECT rc; GetClientRect(wnd, &rc);
+    POINT pt = { x, y };
+    for (int i = 0; i < g_vkCount; i++)
+        if (PtInRect(&g_vk[i].r, pt)) return i;
+    if (PtInRect(&g_rcBack, pt))    return -2;
+    if (PtInRect(&g_rcConfirm, pt)) return -3;
+    if (PtInRect(&g_rcCancel, pt))  return -4;
+    return -1;
+}
+
+static void PaintLock(HWND wnd, HDC dc, int W, int H)
+{
     SetBkMode(dc, TRANSPARENT);
-    HBRUSH bg = CreateSolidBrush(RGB(12, 18, 32));
-    FillRect(dc, &rc, bg);
-    DeleteObject(bg);
+    FillVGrad(dc, (RECT){ 0, 0, W, H }, CLR_BG_TOP, CLR_BG_BOTTOM);
 
-    int W = rc.right;
     time_t now = time(NULL);
+    BOOL lockedUI = now < (time_t)g_state.lockUntil;
 
-    HFONT f1 = CreateFontW(52, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
+    HFONT f1 = CreateFontW(46, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
             0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    HFONT f2 = CreateFontW(30, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+    HFONT f2 = CreateFontW(24, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
             0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    HFONT f3 = CreateFontW(36, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+    HFONT f3 = CreateFontW(30, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+            0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    HFONT fk = CreateFontW(20, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+            0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    HFONT fb = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
             0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
 
-    if (now < (time_t)g_state.lockUntil) {
+    /* 顶部发光标题条 */
+    SelectObject(dc, f1);
+    SetTextColor(dc, CLR_TEXT);
+    RECT t1 = { 0, 36, W, 96 };
+    DrawTextW(dc, L"此 USB 设备已被锁定", -1, &t1, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(dc, f2);
+    SetTextColor(dc, CLR_SUBTEXT);
+    RECT t2 = { 0, 100, W, 136 };
+    DrawTextW(dc, L"请输入解锁密钥以继续访问", -1, &t2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    SetTextColor(dc, CLR_ACCENT);
+    RECT t4 = { 0, 140, W, 172 };
+    wchar_t mbuf[96];
+    wsprintfW(mbuf, L"●  当前解锁模式：%s", ModeName(g_state.mode));
+    DrawTextW(dc, mbuf, -1, &t4, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+
+    if (g_state.fails > 0 && !lockedUI) {
+        wchar_t buf[96];
+        int lockMin = (g_state.fails / 5) * 10;
+        if (lockMin > 0) wsprintfW(buf, L"已累计输错 %d 次 · 再次错满一档将锁定 %d 分钟", g_state.fails, lockMin + 10);
+        else             wsprintfW(buf, L"已累计输错 %d 次", g_state.fails);
+        SetTextColor(dc, CLR_WARN);
+        RECT t3 = { 0, 176, W, 208 };
+        DrawTextW(dc, buf, -1, &t3, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    }
+
+    if (lockedUI) {
+        /* 锁定倒计时：遮罩提示 + 全部控件置灰 */
         int left = (int)(g_state.lockUntil - now);
         int min = left / 60, sec = left % 60;
         wchar_t buf[128];
         if (min > 0) wsprintfW(buf, L"⛔ 输错次数过多，请等待 %d 分 %d 秒后再试", min, sec);
         else         wsprintfW(buf, L"⛔ 输错次数过多，请等待 %d 秒后再试", sec);
-        SetTextColor(dc, RGB(248, 113, 113));
-        SelectObject(dc, f1);
-        RECT tr = { 0, 60, W, 150 };
+        SetTextColor(dc, CLR_DANGER);
+        SelectObject(dc, f3);
+        RECT tr = { 0, H / 2 - 60, W, H / 2 };
         DrawTextW(dc, buf, -1, &tr, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        SelectObject(dc, f2);
+        SetTextColor(dc, CLR_SUBTEXT);
+        RECT tr2 = { 0, H / 2, W, H / 2 + 34 };
+        DrawTextW(dc, L"为防止暴力破解，键盘已暂时冻结", -1, &tr2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+
+        for (int i = 0; i < g_vkCount; i++)
+            RoundedBox(dc, g_vk[i].r, 12, RGB(30, 36, 54), RGB(40, 48, 70), 1);
+        SelectObject(dc, fk);
+        SetTextColor(dc, RGB(70, 80, 100));
+        for (int i = 0; i < g_vkCount; i++) {
+            wchar_t lb[2] = { (wchar_t)g_vk[i].ch, 0 };
+            DrawTextW(dc, lb, -1, &g_vk[i].r, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        }
         SelectObject(dc, f1); DeleteObject(f1);
         SelectObject(dc, f2); DeleteObject(f2);
         SelectObject(dc, f3); DeleteObject(f3);
+        SelectObject(dc, fk); DeleteObject(fk);
+        SelectObject(dc, fb); DeleteObject(fb);
         return;
     }
 
-    SetTextColor(dc, RGB(230, 238, 248));
-    SelectObject(dc, f1);
-    RECT t1 = { 0, 40, W, 120 };
-    DrawTextW(dc, L"此 USB 设备已被锁定", -1, &t1, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-    SetTextColor(dc, RGB(140, 160, 190));
-    SelectObject(dc, f2);
-    RECT t2 = { 0, 125, W, 170 };
-    DrawTextW(dc, L"请输入解锁密钥", -1, &t2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-    SetTextColor(dc, RGB(90, 130, 180));
-    RECT t4 = { 0, 168, W, 205 };
-    wchar_t mbuf[96];
-    wsprintfW(mbuf, L"当前解锁模式：%s", ModeName(g_state.mode));
-    DrawTextW(dc, mbuf, -1, &t4, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-
-    if (g_state.fails > 0) {
-        wchar_t buf[96];
-        int lockMin = (g_state.fails / 5) * 10;
-        if (lockMin > 0) wsprintfW(buf, L"已累计输错 %d 次 · 再次错满一档将锁定 %d 分钟", g_state.fails, lockMin + 10);
-        else             wsprintfW(buf, L"已累计输错 %d 次", g_state.fails);
-        SetTextColor(dc, RGB(250, 190, 120));
-        RECT t3 = { 0, 205, W, 240 };
-        DrawTextW(dc, buf, -1, &t3, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    /* 密码显示框 */
+    RoundedBox(dc, g_rcDisplay, 14, RGB(30, 38, 60), CLR_ACCENT, 2);
+    SelectObject(dc, f3);
+    RECT inner = g_rcDisplay; InflateRect(&inner, -14, -8);
+    if (g_inputLen == 0) {
+        SetTextColor(dc, RGB(90, 108, 136));
+        SelectObject(dc, f2);
+        DrawTextW(dc, L"屏幕键盘或物理键盘输入均可…", -1, &inner, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    } else {
+        wchar_t mask[64];
+        if (g_inputLen > 24) wsprintfW(mask, L"● ×%d（已输入 %d 位）", g_inputLen, g_inputLen);
+        else {
+            int i; for (i = 0; i < g_inputLen; i++) mask[i] = L'●';
+            mask[i] = 0;
+        }
+        SetTextColor(dc, CLR_ACCENT);
+        DrawTextW(dc, mask, -1, &inner, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     }
 
-    /* 密码显示区 */
-    if (g_hDisplay) {
-        wchar_t mask[64];
-        RECT dr; GetClientRect(g_hDisplay, &dr);
-        POINT pt = { 0, 0 }; MapWindowPoints(g_hDisplay, wnd, &pt, 1);
-        OffsetRect(&dr, pt.x, pt.y);
-        HBRUSH bb = CreateSolidBrush(RGB(24, 34, 54));
-        FillRect(dc, &dr, bb); DeleteObject(bb);
-        HBRUSH fb = CreateSolidBrush(RGB(76, 194, 255));
-        FrameRect(dc, &dr, fb); DeleteObject(fb);
-        SetTextColor(dc, RGB(76, 194, 255));
-        SelectObject(dc, f3);
-        RECT inner = dr; InflateRect(&inner, -8, -8);
-        if (g_inputLen == 0) {
-            SetTextColor(dc, RGB(90, 108, 136));
-            DrawTextW(dc, L"（屏幕键盘或物理键盘输入均可）", -1, &inner, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-        } else if (g_inputLen > 20) {
-            wsprintfW(mask, L"●×%d（已输入 %d 位）", g_inputLen, g_inputLen);
-            DrawTextW(dc, mask, -1, &inner, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-        } else {
-            int i;
-            for (i = 0; i < g_inputLen && i < 20; i++) mask[i] = L'●';
-            mask[i] = 0;
-            DrawTextW(dc, mask, -1, &inner, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-        }
+    /* 退格键 */
+    RoundedBox(dc, g_rcBack, 14, g_hoverBtn == 3 ? CLR_KEY_HOVER : CLR_KEY_FILL, CLR_KEY_EDGE, 1);
+    SelectObject(dc, fb);
+    SetTextColor(dc, g_hoverBtn == 3 ? CLR_ACCENT : CLR_TEXT);
+    DrawTextW(dc, L"⌫", -1, &g_rcBack, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+
+    /* 确认（主色实心）/ 取消（红色描边）按钮 */
+    RoundedBox(dc, g_rcConfirm, 16, g_hoverBtn == 1 ? RGB(106, 210, 255) : CLR_ACCENT, RGB(140, 214, 255), 1);
+    SelectObject(dc, fb);
+    SetTextColor(dc, RGB(12, 22, 38));
+    DrawTextW(dc, L"✔  确认解锁", -1, &g_rcConfirm, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    RoundedBox(dc, g_rcCancel, 16, g_hoverBtn == 2 ? RGB(60, 32, 40) : RGB(40, 28, 38), CLR_DANGER, 1);
+    SetTextColor(dc, CLR_DANGER);
+    DrawTextW(dc, L"⏏  取消并弹出U盘", -1, &g_rcCancel, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+
+    /* 屏幕键盘 */
+    SelectObject(dc, fk);
+    for (int i = 0; i < g_vkCount; i++) {
+        BOOL hov = (i == g_hoverKey);
+        RoundedBox(dc, g_vk[i].r, 12, hov ? CLR_KEY_HOVER : CLR_KEY_FILL,
+                   hov ? CLR_ACCENT : CLR_KEY_EDGE, hov ? 2 : 1);
+        SetTextColor(dc, hov ? CLR_ACCENT : CLR_TEXT);
+        wchar_t lb[2] = { (wchar_t)g_vk[i].ch, 0 };
+        DrawTextW(dc, lb, -1, &g_vk[i].r, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     }
 
     SelectObject(dc, f1); DeleteObject(f1);
     SelectObject(dc, f2); DeleteObject(f2);
     SelectObject(dc, f3); DeleteObject(f3);
+    SelectObject(dc, fk); DeleteObject(fk);
+    SelectObject(dc, fb); DeleteObject(fb);
 }
 
 static void ShowLockWindow(void);
@@ -539,93 +651,106 @@ static void EnterStandby(void)
     ShowTrayWindow();
 }
 
+static void DoConfirm(HWND wnd)
+{
+    if (g_inputLen == 0) return;
+    const WCHAR *err = ModeCheckInput(g_state.mode, g_input);
+    if (err) { MessageBoxW(wnd, err, APP_NAME, MB_ICONWARNING); return; }
+    WCHAR tmp[MAX_PWD + 1]; wcscpy(tmp, g_input);
+    if (CheckPassword(tmp)) UnlockSuccess(wnd);
+    else OnWrongPassword(wnd);
+}
+
+static void DoCancel(HWND wnd)
+{
+    if (MessageBoxW(wnd, L"确定取消并弹出 USB 设备吗？\n（程序将关闭并安全弹出U盘）",
+            APP_NAME, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+        HookOff();
+        wchar_t volp[8];
+        wsprintfW(volp, L"%c:\\", g_dir[0]);
+        if (!EjectUsb(wnd) && GetDriveTypeW(volp) == DRIVE_REMOVABLE)
+            MessageBoxW(wnd, L"弹出失败：可能有文件正在被占用，请手动弹出。",
+                APP_NAME, MB_OK | MB_ICONWARNING);
+        ExitProcess(0);
+    }
+}
+
 static LRESULT CALLBACK LockProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
-    case WM_CREATE: {
-        g_hDisplay = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-                0, 0, 10, 10, wnd, NULL, g_hInst, NULL);
-        CreateWindowW(L"BUTTON", L"✔ 确认解锁", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                0, 0, 160, 40, wnd, (HMENU)(INT_PTR)IDC_CONFIRM, g_hInst, NULL);
-        CreateWindowW(L"BUTTON", L"⏏ 取消并弹出U盘", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                0, 0, 160, 40, wnd, (HMENU)(INT_PTR)IDC_CANCEL, g_hInst, NULL);
-        BuildKeyboard(wnd);
-        ApplyModeToKeys();
+    case WM_CREATE:
         SetTimer(wnd, 2, 500, NULL);
+        SetFocus(wnd);
         return 0;
     case WM_ACTIVATE:
-        if (LOWORD(wp) != WA_INACTIVE) SetFocus(wnd);   /* 激活时夺回焦点，保证物理键盘可用 */
+        if (LOWORD(wp) != WA_INACTIVE) SetFocus(wnd);   /* 激活时夺回焦点，物理键盘可用 */
         return 0;
-    }
     case WM_TIMER:
         if (wp == 2) {
             SetWindowPos(wnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            if (g_state.lockUntil && time(NULL) >= (time_t)g_state.lockUntil) {
-                g_state.lockUntil = 0; SaveState();
-                SetButtonsEnabled(wnd, TRUE);
-            }
-            InvalidateRect(wnd, NULL, TRUE);
+            if (g_state.lockUntil && time(NULL) >= (time_t)g_state.lockUntil)
+                g_state.lockUntil = 0, SaveState();
+            InvalidateRect(wnd, NULL, FALSE);   /* 双缓冲下重画无闪烁 */
         }
         return 0;
+    case WM_ERASEBKGND:
+        return 1;   /* 背景在 WM_PAINT 内存位图中绘制，不单独擦除（防闪烁） */
     case WM_SIZE:
-        LayoutLock(wnd);
-        InvalidateRect(wnd, NULL, TRUE);
+        BuildLockLayout(wnd);
+        InvalidateRect(wnd, NULL, FALSE);
         return 0;
     case WM_PAINT: {
+        /* 双缓冲：先在内存位图上画完整帧，再一次性贴到屏幕（根治闪烁） */
         PAINTSTRUCT ps;
-        HDC dc = BeginPaint(wnd, &ps);
-        PaintLock(wnd, dc);
+        HDC wdc = BeginPaint(wnd, &ps);
+        RECT rc; GetClientRect(wnd, &rc);
+        HDC mem = CreateCompatibleDC(wdc);
+        HBITMAP bm = CreateCompatibleBitmap(wdc, rc.right, rc.bottom);
+        HBITMAP ob = (HBITMAP)SelectObject(mem, bm);
+        PaintLock(wnd, mem, rc.right, rc.bottom);
+        BitBlt(wdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, ob);
+        DeleteObject(bm);
+        DeleteDC(mem);
         EndPaint(wnd, &ps);
         return 0;
     }
-    case WM_CTLCOLORSTATIC:
-        if ((HWND)lp == g_hDisplay) return (LRESULT)GetStockObject(NULL_BRUSH);
+    case WM_MOUSEMOVE: {
+        int hit = HitKey(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        int newKey = hit >= 0 ? hit : -1;
+        int newBtn = hit == -2 ? 3 : hit == -3 ? 1 : hit == -4 ? 2 : 0;
+        if (newKey != g_hoverKey || newBtn != g_hoverBtn) {
+            g_hoverKey = newKey; g_hoverBtn = newBtn;
+            InvalidateRect(wnd, NULL, FALSE);
+        }
         return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        int hit = HitKey(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        SetFocus(wnd);
+        time_t now = time(NULL);
+        if (now < (time_t)g_state.lockUntil) return 0;
+        if (hit >= 0)      InputAppend((wchar_t)g_vk[hit].ch);
+        else if (hit == -2) InputBack();
+        else if (hit == -3) DoConfirm(wnd);
+        else if (hit == -4) DoCancel(wnd);
+        return 0;
+    }
     case WM_CHAR: {
         /* 物理键盘输入（密钥模式支持任意可见字符） */
         time_t now = time(NULL);
         if (now < (time_t)g_state.lockUntil) return 0;
         wchar_t c = (wchar_t)wp;
         if (c == 8) { InputBack(); return 0; }
-        if (c == 13) { SendMessageW(wnd, WM_COMMAND, IDC_CONFIRM, 0); return 0; }
+        if (c == 13) { DoConfirm(wnd); return 0; }
         if (c < 0x20) return 0;
-        if (!ModeAllowChar(g_state.mode, c)) return 0;
-        InputAppend(c);
+        InputAppend(c);   /* InputAppend 内部已做模式过滤 */
         return 0;
     }
-    case WM_COMMAND: {
-        int id = LOWORD(wp);
-        time_t now = time(NULL);
-        if (now < (time_t)g_state.lockUntil) return 0;
-        if (id == IDC_BACKSPACE) InputBack();
-        else if (id == IDC_CONFIRM) {
-            if (g_inputLen == 0) return 0;
-            const WCHAR *err = ModeCheckInput(g_state.mode, g_input);
-            if (err) { MessageBoxW(wnd, err, APP_NAME, MB_ICONWARNING); return 0; }
-            WCHAR tmp[MAX_PWD + 1]; wcscpy(tmp, g_input);
-            if (CheckPassword(tmp)) UnlockSuccess(wnd);
-            else OnWrongPassword(wnd);
-        }
-        else if (id == IDC_CANCEL) {
-            if (MessageBoxW(wnd, L"确定取消并弹出 USB 设备吗？\n（程序将关闭并安全弹出U盘）",
-                    APP_NAME, MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                HookOff();
-                wchar_t volp[8];
-                wsprintfW(volp, L"%c:\\", g_dir[0]);
-                if (!EjectUsb(wnd) && GetDriveTypeW(volp) == DRIVE_REMOVABLE)
-                    MessageBoxW(wnd, L"弹出失败：可能有文件正在被占用，请手动弹出。",
-                        APP_NAME, MB_OK | MB_ICONWARNING);
-                ExitProcess(0);
-            }
-        }
-        else if (id >= IDC_KEYBASE && id < IDC_KEYBASE + g_keyCount) {
-            int ch = g_keyChar[id - IDC_KEYBASE];
-            if (ch == -1) InputBack();
-            else if (ModeAllowChar(g_state.mode, (wchar_t)ch)) InputAppend((wchar_t)ch);
-            SetFocus(wnd);   /* 焦点归还主窗口，物理键盘始终可用（v2.0.2） */
-        }
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_CONFIRM) DoConfirm(wnd);
+        else if (LOWORD(wp) == IDC_BACKSPACE) InputBack();
         return 0;
-    }
     case WM_DESTROY:
         KillTimer(wnd, 2);
         if (g_hLockWnd == wnd) {
@@ -653,7 +778,7 @@ static void AddTrayIcon(HWND wnd, BOOL add)
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
-    nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    nid.hIcon = LoadIconW(g_hInst, MAKEINTRESOURCEW(100));
     wcscpy(nid.szTip, APP_NAME L" 待命中（双击重新锁定）");
     if (add) Shell_NotifyIconW(NIM_ADD, &nid);
     else     Shell_NotifyIconW(NIM_DELETE, &nid);
@@ -735,9 +860,9 @@ static LRESULT CALLBACK VerifyProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         CreateWindowW(L"STATIC", L"请输入密码：", WS_CHILD|WS_VISIBLE, 20, 20, 340, 24, wnd, NULL, g_hInst, NULL);
         g_hVerifyEdit = CreateWindowW(L"EDIT", L"", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_PASSWORD|ES_AUTOHSCROLL,
             20, 52, 340, 30, wnd, (HMENU)(INT_PTR)101, g_hInst, NULL);
-        HWND ok = CreateWindowW(L"BUTTON", L"确定", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON,
+        HWND ok = CreateWindowW(L"BUTTON", L"确定", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
             100, 100, 80, 32, wnd, (HMENU)(INT_PTR)102, g_hInst, NULL);
-        HWND no = CreateWindowW(L"BUTTON", L"取消", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        HWND no = CreateWindowW(L"BUTTON", L"取消", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
             200, 100, 80, 32, wnd, (HMENU)(INT_PTR)103, g_hInst, NULL);
         SendMessageW(g_hVerifyEdit, WM_SETFONT, (WPARAM)fn, TRUE);
         SendMessageW(ok, WM_SETFONT, (WPARAM)fn, TRUE);
@@ -745,6 +870,15 @@ static LRESULT CALLBACK VerifyProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         DeleteObject(fn);
         SetFocus(g_hVerifyEdit);
         return 0;
+    }
+    case WM_ERASEBKGND: return ModernErase(wnd, (HDC)wp);
+    case WM_CTLCOLORSTATIC: return ModernStatic((HDC)wp);
+    case WM_CTLCOLOREDIT:   return ModernEdit((HDC)wp);
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lp;
+        if (dis->CtlID == 102) return ModernBtnDraw(dis, CLR_ACCENT, RGB(140,214,255), RGB(12,22,38));
+        if (dis->CtlID == 103) return ModernBtnDraw(dis, RGB(40,48,72), CLR_KEY_EDGE, CLR_TEXT);
+        return FALSE;
     }
     case WM_COMMAND: {
         int id = LOWORD(wp);
@@ -835,7 +969,7 @@ static LRESULT CALLBACK SuperProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         CreateWindowW(L"STATIC", L"恢复密码：", WS_CHILD|WS_VISIBLE, 20, 55, 90, 22, wnd, NULL, g_hInst, NULL);
         g_hRecEdit = CreateWindowW(L"EDIT", L"", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_PASSWORD|ES_AUTOHSCROLL,
             115, 52, 220, 28, wnd, (HMENU)(INT_PTR)201, g_hInst, NULL);
-        HWND bv = CreateWindowW(L"BUTTON", L"验证", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON,
+        HWND bv = CreateWindowW(L"BUTTON", L"验证", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
             20, 92, 110, 32, wnd, (HMENU)(INT_PTR)202, g_hInst, NULL);
         /* 第二步面板（验证成功后整体显示，子控件随面板隐藏） */
         g_hSupPanel = CreateWindowW(L"STATIC", L"",
@@ -847,7 +981,7 @@ static LRESULT CALLBACK SuperProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         CreateWindowW(L"STATIC", L"再输入：", WS_CHILD|WS_VISIBLE, 12, 74, 90, 22, g_hSupPanel, NULL, g_hInst, NULL);
         g_hSupNew2 = CreateWindowW(L"EDIT", L"", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_PASSWORD|ES_AUTOHSCROLL,
             105, 72, 220, 26, g_hSupPanel, (HMENU)(INT_PTR)204, g_hInst, NULL);
-        CreateWindowW(L"BUTTON", L"重置密码", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", L"重置密码", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
             105, 105, 120, 30, g_hSupPanel, (HMENU)(INT_PTR)205, g_hInst, NULL);
         CreateWindowW(L"STATIC", L"── 忘记密码重置期限 ──", WS_CHILD|WS_VISIBLE, 12, 145, 220, 22, g_hSupPanel, NULL, g_hInst, NULL);
         g_hSupForget = CreateWindowW(L"COMBOBOX", L"",
@@ -856,7 +990,7 @@ static LRESULT CALLBACK SuperProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         SendMessageW(g_hSupForget, CB_ADDSTRING, 0, (LPARAM)L"24 小时后自动重置");
         SendMessageW(g_hSupForget, CB_ADDSTRING, 0, (LPARAM)L"30 天后自动重置");
         SendMessageW(g_hSupForget, CB_ADDSTRING, 0, (LPARAM)L"365 天后自动重置");
-        CreateWindowW(L"BUTTON", L"保存期限", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", L"保存期限", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
             230, 170, 110, 28, g_hSupPanel, (HMENU)(INT_PTR)207, g_hInst, NULL);
         g_hSupFmt = CreateWindowW(L"BUTTON", L"开启格式化兜底（错61次起清盘，危险！）",
             WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 12, 208, 390, 24, g_hSupPanel, (HMENU)(INT_PTR)208, g_hInst, NULL);
@@ -869,6 +1003,16 @@ static LRESULT CALLBACK SuperProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         DeleteObject(f); DeleteObject(fn);
         SendMessageW(g_hSupFmt, BM_SETCHECK, g_state.formatOn ? BST_CHECKED : BST_UNCHECKED, 0);
         return 0;
+    }
+    case WM_ERASEBKGND: return ModernErase(wnd, (HDC)wp);
+    case WM_CTLCOLORSTATIC: return ModernStatic((HDC)wp);
+    case WM_CTLCOLOREDIT:   return ModernEdit((HDC)wp);
+    case WM_CTLCOLORBTN:    return ModernStatic((HDC)wp);
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lp;
+        if (dis->CtlID == 202 || dis->CtlID == 205 || dis->CtlID == 207)
+            return ModernBtnDraw(dis, CLR_ACCENT, RGB(140,214,255), RGB(12,22,38));
+        return FALSE;
     }
     case WM_COMMAND: {
         int id = LOWORD(wp), ev = HIWORD(wp);
@@ -919,7 +1063,7 @@ static LRESULT CALLBACK SuperProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 
 static void ShowSuperWindow(void)
 {
-    RegOneClass(SuperProc, L"USBsafelySuper", CreateSolidBrush(RGB(28, 32, 40)));
+    RegOneClass(SuperProc, L"USBsafelySuper", NULL);
     CreateWindowW(L"USBsafelySuper", L"USB_safely 超级模式",
         (WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX)) | WS_VISIBLE,
         CW_USEDEFAULT, CW_USEDEFAULT, 450, 430, NULL, NULL, g_hInst, NULL);
@@ -981,7 +1125,7 @@ static LRESULT CALLBACK SetupProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         for (int i = 0; i <= 4; i++)
             SendMessageW(g_hModeCombo, CB_ADDSTRING, 0, (LPARAM)ModeName(i));
         SendMessageW(g_hModeCombo, CB_SETCURSEL, g_state.mode, 0);
-        HWND sm = CreateWindowW(L"BUTTON", L"应用模式", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        HWND sm = CreateWindowW(L"BUTTON", L"应用模式", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
             295, 46, 110, 30, wnd, (HMENU)(INT_PTR)IDC_BTNSAVE, g_hInst, NULL);
         CreateWindowW(L"STATIC", L"── 修改密码 ──", WS_CHILD|WS_VISIBLE, 30, 92, 340, 26, wnd, NULL, g_hInst, NULL);
         CreateWindowW(L"STATIC", L"旧密码：", WS_CHILD|WS_VISIBLE, 30, 128, 90, 22, wnd, NULL, g_hInst, NULL);
@@ -993,11 +1137,11 @@ static LRESULT CALLBACK SetupProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         CreateWindowW(L"STATIC", L"再输入：", WS_CHILD|WS_VISIBLE, 30, 198, 90, 22, wnd, NULL, g_hInst, NULL);
         g_hNew2 = CreateWindowW(L"EDIT", L"", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_PASSWORD|ES_AUTOHSCROLL,
             125, 195, 240, 28, wnd, (HMENU)(INT_PTR)IDC_EDNEW2, g_hInst, NULL);
-        HWND chg = CreateWindowW(L"BUTTON", L"修改密码", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+        HWND chg = CreateWindowW(L"BUTTON", L"修改密码", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
             125, 232, 160, 34, wnd, (HMENU)(INT_PTR)IDC_BTNCHG, g_hInst, NULL);
         CreateWindowW(L"STATIC", L"── 关于程序 ──", WS_CHILD|WS_VISIBLE, 30, 280, 340, 26, wnd, NULL, g_hInst, NULL);
         g_hVerLabel = CreateWindowW(L"BUTTON", L"版本 " APP_VER L"（连点5下开启超级模式）",
-            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON|BS_LEFT, 30, 310, 355, 34, wnd, (HMENU)(INT_PTR)IDC_VERLBL, g_hInst, NULL);
+            WS_CHILD|WS_VISIBLE|BS_OWNERDRAW, 30, 310, 355, 34, wnd, (HMENU)(INT_PTR)IDC_VERLBL, g_hInst, NULL);
         wchar_t about[256];
         wsprintfW(about, L"USB_safely — U盘锁\n制作团队：%s\n保护 U 盘个人文件，防止别人翻看", TEAM_NAME);
         g_hAbout = CreateWindowW(L"STATIC", about, WS_CHILD|WS_VISIBLE, 30, 355, 380, 90, wnd, NULL, g_hInst, NULL);
@@ -1011,6 +1155,18 @@ static LRESULT CALLBACK SetupProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         SendMessageW(g_hAbout, WM_SETFONT, (WPARAM)fn, TRUE);
         DeleteObject(f); DeleteObject(fn);
         return 0;
+    }
+    case WM_ERASEBKGND: return ModernErase(wnd, (HDC)wp);
+    case WM_CTLCOLORSTATIC: return ModernStatic((HDC)wp);
+    case WM_CTLCOLOREDIT:   return ModernEdit((HDC)wp);
+    case WM_CTLCOLORBTN:    return ModernStatic((HDC)wp);
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lp;
+        if (dis->CtlID == IDC_BTNCHG || dis->CtlID == IDC_BTNSAVE)
+            return ModernBtnDraw(dis, CLR_ACCENT, RGB(140,214,255), RGB(12,22,38));
+        if (dis->CtlID == IDC_VERLBL)
+            return ModernBtnDraw(dis, RGB(40,48,72), CLR_KEY_EDGE, CLR_ACCENT);
+        return FALSE;
     }
     case WM_COMMAND: {
         int id = LOWORD(wp), ev = HIWORD(wp);
@@ -1037,7 +1193,8 @@ static ATOM RegOneClass(WNDPROC proc, const wchar_t *name, HBRUSH bg)
     wc.lpfnWndProc = proc;
     wc.hInstance = g_hInst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = bg ? bg : CreateSolidBrush(RGB(12, 18, 32));
+    wc.hbrBackground = bg;   /* NULL = 由窗口过程自绘渐变背景（v2.1.0） */
+    wc.hIcon = LoadIconW(g_hInst, MAKEINTRESOURCEW(100));
     wc.lpszClassName = name;
     return RegisterClassW(&wc);
 }
@@ -1055,7 +1212,7 @@ static void ShowLockWindow(void)
 
 static void ShowTrayWindow(void)
 {
-    RegOneClass(TrayProc, L"USBsafelyTray", CreateSolidBrush(RGB(28, 32, 40)));
+    RegOneClass(TrayProc, L"USBsafelyTray", NULL);
     g_hTrayWnd = CreateWindowW(L"USBsafelyTray", APP_NAME L" 待命",
         WS_OVERLAPPED, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0,
         NULL, NULL, g_hInst, NULL);
@@ -1104,8 +1261,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE prev, LPWSTR cmd, int show)
         setupMode = TRUE;
     }
 
-    RegOneClass(SetupProc,  L"USBsafelySetup",  CreateSolidBrush(RGB(28, 32, 40)));
-    RegOneClass(VerifyProc, L"USBsafelyVerify", CreateSolidBrush(RGB(28, 32, 40)));
+    RegOneClass(SetupProc,  L"USBsafelySetup",  NULL);
+    RegOneClass(VerifyProc, L"USBsafelyVerify", NULL);
 
     if (setupMode) {
         CreateWindowW(L"USBsafelySetup", L"USB_safely 设置",

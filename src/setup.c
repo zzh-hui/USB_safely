@@ -21,7 +21,7 @@
 #include <time.h>
 
 #define APP_NAME  L"USB_safely"
-#define APP_VER   L"V2.0.2"
+#define APP_VER   L"V2.1.0"
 #define REG_KEY   L"Software\\USBsafely"
 #define REG_UNINS L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\USBsafely"
 
@@ -127,6 +127,70 @@ static BOOL GetRegStr(const WCHAR *sub, const WCHAR *name, WCHAR *out, DWORD cch
     return ok;
 }
 
+/* ---------------- v2.1.0 现代化 UI ---------------- */
+static void FillVGrad(HDC dc, RECT rc, COLORREF c1, COLORREF c2)
+{
+    TRIVERTEX tv[2] = {
+        { rc.left,  rc.top,    (USHORT)(GetRValue(c1) << 8), (USHORT)(GetGValue(c1) << 8), (USHORT)(GetBValue(c1) << 8), 0 },
+        { rc.right, rc.bottom, (USHORT)(GetRValue(c2) << 8), (USHORT)(GetGValue(c2) << 8), (USHORT)(GetBValue(c2) << 8), 0 }
+    };
+    GRADIENT_RECT gr = { 0, 1 };
+    GradientFill(dc, tv, 2, &gr, 1, GRADIENT_FILL_RECT_V);
+}
+static void RoundedBox(HDC dc, RECT r, int rad, COLORREF fill, COLORREF border, int penw)
+{
+    HBRUSH b = (fill == -1) ? (HBRUSH)GetStockObject(NULL_BRUSH) : CreateSolidBrush(fill);
+    HPEN  p = (border == -1) ? (HPEN)GetStockObject(NULL_PEN) : CreatePen(PS_SOLID, penw, border);
+    HBRUSH ob = (HBRUSH)SelectObject(dc, b);
+    HPEN  op = (HPEN)SelectObject(dc, p);
+    RoundRect(dc, r.left, r.top, r.right + 1, r.bottom + 1, rad, rad);
+    SelectObject(dc, ob); SelectObject(dc, op);
+    if (fill != -1) DeleteObject(b);
+    if (border != -1) DeleteObject(p);
+}
+#define CLR_BG_TOP     RGB(26, 32, 52)
+#define CLR_BG_BOTTOM  RGB(44, 38, 68)
+#define CLR_ACCENT     RGB(76, 194, 255)
+#define CLR_TEXT       RGB(232, 240, 252)
+static HBRUSH g_hEditBrush = NULL;
+static LRESULT ModernErase(HWND wnd, HDC dc)
+{
+    RECT rc; GetClientRect(wnd, &rc);
+    FillVGrad(dc, rc, CLR_BG_TOP, CLR_BG_BOTTOM);
+    return 1;
+}
+static LRESULT ModernStatic(HDC dc)
+{
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, CLR_TEXT);
+    return (LRESULT)GetStockObject(NULL_BRUSH);
+}
+static LRESULT ModernEdit(HDC dc)
+{
+    if (!g_hEditBrush) g_hEditBrush = CreateSolidBrush(RGB(30, 38, 60));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, CLR_TEXT);
+    return (LRESULT)g_hEditBrush;
+}
+static BOOL ModernBtnDraw(DRAWITEMSTRUCT *dis, COLORREF fill, COLORREF border, COLORREF textc)
+{
+    BOOL down = (dis->itemState & ODS_SELECTED) != 0;
+    BOOL off  = (dis->itemState & ODS_DISABLED)  != 0;
+    RoundedBox(dis->hDC, dis->rcItem, 14,
+               off ? RGB(30, 36, 54) : (down ? RGB(22, 28, 46) : fill),
+               off ? RGB(44, 52, 74) : border, 1);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, off ? RGB(80, 92, 116) : textc);
+    HFONT f = CreateFontW(17, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+            0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    HFONT of = (HFONT)SelectObject(dis->hDC, f);
+    WCHAR txt[96]; GetWindowTextW(dis->hwndItem, txt, 96);
+    DrawTextW(dis->hDC, txt, -1, &dis->rcItem, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(dis->hDC, of);
+    DeleteObject(f);
+    return TRUE;
+}
+
 /* ---------------- 安装 ---------------- */
 static void DoInstall(HWND wnd)
 {
@@ -191,7 +255,7 @@ static void DoInstall(HWND wnd)
     Log(wnd, L"[5/6] 写入注册表（卸载项）...\r\n");
     SetRegStr(HKEY_CURRENT_USER, REG_KEY, L"InstallPath", g_install);
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayName", APP_NAME L" U盘锁");
-    SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayVersion", L"2.0.2");
+    SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayVersion", L"2.1.0");
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"Publisher", L"APPLE_INT · Geek-Hub");
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayIcon", mainExe);
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"InstallLocation", g_install);
@@ -304,7 +368,7 @@ static LRESULT CALLBACK SetupWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             CreateWindowW(L"STATIC", L"安装目录（可填 U 盘盘符根目录，或硬盘目录用于测试）：", WS_CHILD|WS_VISIBLE, 20, 55, 420, 22, wnd, NULL, g_hInst, NULL);
             g_hPathEdit = CreateWindowW(L"EDIT", g_install, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL,
                 20, 80, 330, 28, wnd, (HMENU)(INT_PTR)IDC_PATH, g_hInst, NULL);
-            CreateWindowW(L"BUTTON", L"...", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+            CreateWindowW(L"BUTTON", L"…", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
                 358, 79, 60, 30, wnd, (HMENU)(INT_PTR)IDC_BROWSE, g_hInst, NULL);
             CreateWindowW(L"STATIC", L"启动密码（首次必须 4 位数字，之后可在程序内修改）：", WS_CHILD|WS_VISIBLE, 20, 122, 420, 22, wnd, NULL, g_hInst, NULL);
             CreateWindowW(L"STATIC", L"密码：", WS_CHILD|WS_VISIBLE, 20, 155, 60, 22, wnd, NULL, g_hInst, NULL);
@@ -313,7 +377,7 @@ static LRESULT CALLBACK SetupWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             CreateWindowW(L"STATIC", L"确认：", WS_CHILD|WS_VISIBLE, 225, 155, 60, 22, wnd, NULL, g_hInst, NULL);
             g_hPin2 = CreateWindowW(L"EDIT", L"", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_PASSWORD,
                 290, 152, 120, 28, wnd, (HMENU)(INT_PTR)IDC_PIN2, g_hInst, NULL);
-            HWND go = CreateWindowW(L"BUTTON", L"安 装", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON,
+            HWND go = CreateWindowW(L"BUTTON", L"安  装", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
                 20, 200, 180, 40, wnd, (HMENU)(INT_PTR)IDC_GO, g_hInst, NULL);
             g_hLog = CreateWindowW(L"EDIT", L"", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY,
                 20, 255, 420, 130, wnd, NULL, g_hInst, NULL);
@@ -330,7 +394,7 @@ static LRESULT CALLBACK SetupWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             CreateWindowW(L"STATIC", L"卸载保护：请输入启动密码确认：", WS_CHILD|WS_VISIBLE, 20, 90, 420, 22, wnd, NULL, g_hInst, NULL);
             g_hUnPin = CreateWindowW(L"EDIT", L"", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_PASSWORD|ES_AUTOHSCROLL,
                 20, 118, 200, 28, wnd, (HMENU)(INT_PTR)IDC_UNPIN, g_hInst, NULL);
-            HWND go = CreateWindowW(L"BUTTON", L"卸 载", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+            HWND go = CreateWindowW(L"BUTTON", L"卸  载", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
                 20, 160, 180, 40, wnd, (HMENU)(INT_PTR)IDC_GO, g_hInst, NULL);
             g_hLog = CreateWindowW(L"EDIT", L"", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY,
                 20, 215, 420, 110, wnd, NULL, g_hInst, NULL);
@@ -343,6 +407,15 @@ static LRESULT CALLBACK SetupWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         SendMessageW(hTitle, WM_SETFONT, (WPARAM)f, TRUE);
         DeleteObject(f); DeleteObject(fn); DeleteObject(fb);
         return 0;
+    }
+    case WM_ERASEBKGND: return ModernErase(wnd, (HDC)wp);
+    case WM_CTLCOLORSTATIC: return ModernStatic((HDC)wp);
+    case WM_CTLCOLOREDIT:   return ModernEdit((HDC)wp);
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lp;
+        if (dis->CtlID == IDC_GO)      return ModernBtnDraw(dis, CLR_ACCENT, RGB(140,214,255), RGB(12,22,38));
+        if (dis->CtlID == IDC_BROWSE)  return ModernBtnDraw(dis, RGB(40,48,72), RGB(66,86,124), CLR_TEXT);
+        return FALSE;
     }
     case WM_COMMAND: {
         int id = LOWORD(wp), ev = HIWORD(wp);
@@ -393,7 +466,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE prev, LPWSTR cmd, int show)
     wc.lpfnWndProc = SetupWndProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = CreateSolidBrush(RGB(28, 32, 40));
+    wc.hbrBackground = NULL;
+    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(100));
     wc.lpszClassName = L"USBsafelySetupWnd";
     RegisterClassW(&wc);
 
