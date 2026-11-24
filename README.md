@@ -1,10 +1,10 @@
 # USB_safely — U盘锁
 
 > U盘锁·电脑防护程序：保护 U 盘里的个人文件，防止别人翻看。
-> 设计来源：JAC 初中时期手写设计方案（v1 草案 + v2.0），由 Geek-Hub 实现。
+> 设计来源：APPLE_INT 初中时期手写设计方案（v1 草案 + v2.0），由 Geek-Hub 实现。
 > 完整设计规格见 [DESIGN.md](DESIGN.md)。
 
-## 当前版本：v2.0.0
+## 当前版本：v2.0.1
 
 **一个安装程序走天下**：`USBsafely-Setup.exe`（安装/卸载二合一，主程序内嵌其中）
 
@@ -78,4 +78,4 @@ x86_64-w64-mingw32-gcc setup.c setupres.o -o USBsafely-Setup.exe -municode -mwin
 
 ## 制作团队
 
-**JAC**（设计方案）· Geek-Hub（实现）
+**APPLE_INT**（设计方案）· Geek-Hub（实现）

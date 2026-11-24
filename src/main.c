@@ -1,6 +1,6 @@
 /* =====================================================================
  * USB_safely — U盘锁 v2.0.0 主程序
- * 设计来源：USB_safely 设计方案（JAC）· 见仓库 DESIGN.md
+ * 设计来源：USB_safely 设计方案（APPLE_INT）· 见仓库 DESIGN.md
  * ---------------------------------------------------------------------
  * v2.0 功能（对照 DESIGN.md）：
  *   1. 解锁模式分级：0无需解锁 / 1普通(数字) / 2加密(字母) /
@@ -33,8 +33,8 @@ DEFINE_GUID(GUID_DEVINTERFACE_DISK,
     0x53f56307L, 0xb6bf, 0x11d0, 0x94, 0xd2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b);
 
 #define APP_NAME     L"USB_safely"
-#define APP_VER      L"V2.0.0"
-#define TEAM_NAME    L"JAC · Geek-Hub"
+#define APP_VER      L"V2.0.1"
+#define TEAM_NAME    L"APPLE_INT · Geek-Hub"
 #define MAX_PWD      500      /* 密钥模式上限（DESIGN.md 第三节） */
 
 /* ---------------- 全局状态 ---------------- */
@@ -100,6 +100,19 @@ done:
     return ok;
 }
 
+static BOOL WriteHexFile(const WCHAR *file, const WCHAR hex[65])
+{
+    /* 哈希是纯 ASCII，按字节写，避免宽流 %s 的未定义行为（会写出垃圾内容） */
+    FILE *f = _wfopen(file, L"wb");
+    if (!f) return FALSE;
+    char b[66];
+    for (int i = 0; i < 64; i++) b[i] = (char)hex[i];
+    b[64] = '\n'; b[65] = 0;
+    BOOL ok = fwrite(b, 1, 65, f) == 65;
+    fclose(f);
+    return ok;
+}
+
 static BOOL ReadHexFile(const WCHAR *file, WCHAR hex[65])
 {
     FILE *f = _wfopen(file, L"r");
@@ -128,11 +141,7 @@ static BOOL CheckPassword(const WCHAR *input)
 
 static BOOL SavePasswordHash(const WCHAR hex[65])
 {
-    FILE *f = _wfopen(g_pwFile, L"w");
-    if (!f) return FALSE;
-    fwprintf(f, L"%s\n", hex);
-    fclose(f);
-    return TRUE;
+    return WriteHexFile(g_pwFile, hex);
 }
 
 static BOOL CheckRecovery(const WCHAR *input)
@@ -861,12 +870,9 @@ static LRESULT CALLBACK SuperProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
                         APP_NAME, MB_YESNO | MB_ICONQUESTION) != IDYES)
                     return 0;
                 WCHAR nh[65];
-                if (!Sha256Hex(rec, nh) || !_wfopen(g_recFile, L"w")) {
-                    /* 写入 */
-                    FILE *f = _wfopen(g_recFile, L"w");
-                    if (!f) { MessageBoxW(wnd, L"写入失败", APP_NAME, MB_ICONERROR); return 0; }
-                    fwprintf(f, L"%s\n", nh);
-                    fclose(f);
+                if (!Sha256Hex(rec, nh) || !WriteHexFile(g_recFile, nh)) {
+                    MessageBoxW(wnd, L"写入失败", APP_NAME, MB_ICONERROR);
+                    return 0;
                 }
                 MessageBoxW(wnd, L"恢复密码已设置，已进入超级模式。", APP_NAME, MB_OK | MB_ICONINFORMATION);
                 g_supVerified = 1;

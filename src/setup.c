@@ -21,7 +21,7 @@
 #include <time.h>
 
 #define APP_NAME  L"USB_safely"
-#define APP_VER   L"V2.0.0"
+#define APP_VER   L"V2.0.1"
 #define REG_KEY   L"Software\\USBsafely"
 #define REG_UNINS L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\USBsafely"
 
@@ -171,19 +171,28 @@ static void DoInstall(HWND wnd)
     WCHAR hex[65];
     if (!Sha256Hex(pin1, hex)) { MessageBoxW(wnd, L"密码加密失败", APP_NAME, MB_ICONERROR); return; }
     wchar_t pwFile[MAX_PATH]; wsprintfW(pwFile, L"%s\\pw.sf", pwDir);
-    FILE *f = _wfopen(pwFile, L"w");
-    if (!f) { MessageBoxW(wnd, L"写入密码文件失败", APP_NAME, MB_ICONERROR); return; }
-    fwprintf(f, L"%s\n", hex);
-    fclose(f);
+    {
+        /* 哈希是纯 ASCII，按字节写，避免宽流 %s 的未定义行为 */
+        FILE *f = _wfopen(pwFile, L"wb");
+        if (!f) { MessageBoxW(wnd, L"写入密码文件失败", APP_NAME, MB_ICONERROR); return; }
+        char b[66];
+        for (int i = 0; i < 64; i++) b[i] = (char)hex[i];
+        b[64] = '\n'; b[65] = 0;
+        if (fwrite(b, 1, 65, f) != 65) {
+            fclose(f);
+            MessageBoxW(wnd, L"写入密码文件失败", APP_NAME, MB_ICONERROR); return;
+        }
+        fclose(f);
+    }
     wchar_t stFile[MAX_PATH]; wsprintfW(stFile, L"%s\\state.sf", pwDir);
-    f = _wfopen(stFile, L"w");
-    if (f) { fwprintf(f, L"mode=1\nfails=0\nlockUntil=0\nforget=0\nformatOn=0\nuninstProt=1\n"); fclose(f); }
+    FILE *sf = _wfopen(stFile, L"w");
+    if (sf) { fwprintf(sf, L"mode=1\nfails=0\nlockUntil=0\nforget=0\nformatOn=0\nuninstProt=1\n"); fclose(sf); }
 
     Log(wnd, L"[5/6] 写入注册表（卸载项）...\r\n");
     SetRegStr(HKEY_CURRENT_USER, REG_KEY, L"InstallPath", g_install);
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayName", APP_NAME L" U盘锁");
-    SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayVersion", L"2.0.0");
-    SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"Publisher", L"JAC · Geek-Hub");
+    SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayVersion", L"2.0.1");
+    SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"Publisher", L"APPLE_INT · Geek-Hub");
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayIcon", mainExe);
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"InstallLocation", g_install);
     wchar_t unins[MAX_PATH * 2];
@@ -203,7 +212,7 @@ static void DoUninstall(HWND wnd)
     wchar_t pin[8];
     GetWindowTextW(g_hUnPin, pin, 8);
 
-    /* 验证启动密码（卸载保护） */
+    /* 验证启动密码（卸载保护）：密码文件存在则必须通过验证 */
     WCHAR want[65], hex[65];
     wchar_t pwFile[MAX_PATH];
     wsprintfW(pwFile, L"%s\\password\\pw.sf", g_install);
@@ -214,10 +223,15 @@ static void DoUninstall(HWND wnd)
             wchar_t *p = line; int n = 0;
             while (*p == L' ') p++;
             while (p[n] && p[n] != L'\r' && p[n] != L'\n' && n < 64) n++;
-            if (n == 64) { line[0]=0; wcsncpy(want, p, 64); want[64]=0; have = TRUE; }
+            if (n == 64) { wcsncpy(want, p, 64); want[64] = 0; have = TRUE; }
         }
         fclose(f);
-        if (have) {
+        if (!have) {
+            /* 密码文件损坏无法验证 → 明确提示，需二次确认后才能继续 */
+            if (MessageBoxW(wnd,
+                    L"密码文件已损坏，无法验证启动密码。\n\n继续卸载将不做密码校验（可能是程序被破坏），确定继续吗？",
+                    APP_NAME" 卸载", MB_YESNO | MB_ICONWARNING) != IDYES) return;
+        } else {
             if (wcslen(pin) < 1) { MessageBoxW(wnd, L"请输入启动密码以确认卸载", APP_NAME, MB_ICONWARNING); return; }
             Sha256Hex(pin, hex);
             if (_wcsicmp(hex, want) != 0) {
@@ -225,6 +239,10 @@ static void DoUninstall(HWND wnd)
                 return;
             }
         }
+    } else {
+        if (MessageBoxW(wnd,
+                L"未找到密码文件（卸载保护失效）。\n\n这可能意味着密码被非法删除，确定继续卸载吗？",
+                APP_NAME" 卸载", MB_YESNO | MB_ICONWARNING) != IDYES) return;
     }
 
     if (MessageBoxW(wnd,
