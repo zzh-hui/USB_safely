@@ -34,7 +34,7 @@ DEFINE_GUID(GUID_DEVINTERFACE_DISK,
     0x53f56307L, 0xb6bf, 0x11d0, 0x94, 0xd2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b);
 
 #define APP_NAME     L"USB_safely"
-#define APP_VER      L"V2.1.1"
+#define APP_VER      L"V2.1.1.5"
 #define TEAM_NAME    L"APPLE_INT · Geek-Hub"
 #define MAX_PWD      500      /* 密钥模式上限（DESIGN.md 第三节） */
 
@@ -709,6 +709,7 @@ static LRESULT CALLBACK LockProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_CREATE:
+        InputClear();   /* v2.1.1.5：每次打开锁屏都清空输入，防止残留密码直接点确认通过 */
         SetTimer(wnd, 2, 500, NULL);
         SetFocus(wnd);
         return 0;
