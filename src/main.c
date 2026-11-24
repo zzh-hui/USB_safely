@@ -34,7 +34,7 @@ DEFINE_GUID(GUID_DEVINTERFACE_DISK,
     0x53f56307L, 0xb6bf, 0x11d0, 0x94, 0xd2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b);
 
 #define APP_NAME     L"USB_safely"
-#define APP_VER      L"V2.1.0"
+#define APP_VER      L"V2.1.1"
 #define TEAM_NAME    L"APPLE_INT · Geek-Hub"
 #define MAX_PWD      500      /* 密钥模式上限（DESIGN.md 第三节） */
 
@@ -142,7 +142,23 @@ static BOOL CheckPassword(const WCHAR *input)
 
 static BOOL SavePasswordHash(const WCHAR hex[65])
 {
-    return WriteHexFile(g_pwFile, hex);
+    /* v2.1.1：原子化写入——临时文件 → 读回校验 → 原子替换，
+       杜绝写一半/新旧内容混合导致"输什么都不对"的损坏密码文件 */
+    wchar_t tmp[1100];
+    wsprintfW(tmp, L"%s.tmp", g_pwFile);
+    if (!WriteHexFile(tmp, hex)) return FALSE;
+    WCHAR back[65];
+    if (!ReadHexFile(tmp, back) || _wcsicmp(back, hex) != 0) {
+        DeleteFileW(tmp);
+        return FALSE;
+    }
+    if (!MoveFileExW(tmp, g_pwFile, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(tmp);
+        return FALSE;
+    }
+    /* 终验：正式文件读回必须等于刚写的哈希 */
+    if (!ReadHexFile(g_pwFile, back) || _wcsicmp(back, hex) != 0) return FALSE;
+    return TRUE;
 }
 
 static BOOL CheckRecovery(const WCHAR *input)
@@ -207,6 +223,20 @@ static const WCHAR *ModeCheckInput(int mode, const WCHAR *s)
 {
     if (mode == 3 && (int)wcslen(s) != 9) return L"进阶模式要求密码恰好 9 位（数字+字母+符号组合）";
     return NULL;
+}
+
+/* v2.1.1：按新密码内容自动匹配解锁模式，杜绝"字母密码+数字模式"锁死 */
+static int DetectMode(const WCHAR *s)
+{
+    BOOL dig = TRUE, let = TRUE;
+    for (const WCHAR *p = s; *p; p++) {
+        if (*p < L'0' || *p > L'9') dig = FALSE;
+        if (!((*p >= L'A' && *p <= L'Z') || (*p >= L'a' && *p <= L'z'))) let = FALSE;
+    }
+    if (dig) return 1;                      /* 全数字 → 普通模式 */
+    if (let) return 2;                      /* 全字母 → 加密模式 */
+    if ((int)wcslen(s) == 9) return 3;      /* 9 位混合 → 进阶模式 */
+    return 4;                               /* 其他 → 密钥模式 */
 }
 
 /* ---------------- 键盘钩子：屏蔽快捷键 ---------------- */
@@ -851,6 +881,7 @@ static LRESULT CALLBACK TrayProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 static HWND g_hVerifyWnd = NULL;
 static HWND g_hVerifyEdit = NULL;
 static BOOL g_verifyOk = FALSE;
+static wchar_t g_verifyBuf[MAX_PWD + 1];   /* v2.1.1：记录本次输入的密码文本 */
 
 static LRESULT CALLBACK VerifyProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -885,6 +916,7 @@ static LRESULT CALLBACK VerifyProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (id == 102) {
             wchar_t buf[MAX_PWD + 1];
             GetWindowTextW(g_hVerifyEdit, buf, MAX_PWD + 1);
+            wcscpy(g_verifyBuf, buf);
             g_verifyOk = CheckPassword(buf);
             DestroyWindow(wnd);
         } else if (id == 103) {
@@ -927,12 +959,15 @@ static void DoSuperReset(HWND wnd)
     GetWindowTextW(g_hSupNew2, nw2, MAX_PWD + 1);
     if (!nw1[0]) { MessageBoxW(wnd, L"新密码不能为空", APP_NAME, MB_ICONWARNING); return; }
     if (wcscmp(nw1, nw2) != 0) { MessageBoxW(wnd, L"两次输入的新密码不一致", APP_NAME, MB_ICONWARNING); return; }
-    const WCHAR *err = ModeCheckInput(g_state.mode, nw1);
-    if (err) { MessageBoxW(wnd, err, APP_NAME, MB_ICONWARNING); return; }
+    int newMode = DetectMode(nw1);   /* v2.1.1：模式自动跟随 */
     WCHAR hex[65];
     if (Sha256Hex(nw1, hex) && SavePasswordHash(hex)) {
-        g_state.fails = 0; g_state.lockUntil = 0; SaveState();
-        MessageBoxW(wnd, L"锁屏密码已重置！", APP_NAME, MB_OK | MB_ICONINFORMATION);
+        g_state.fails = 0; g_state.lockUntil = 0;
+        g_state.mode = newMode;
+        SaveState();
+        wchar_t msg[160];
+        wsprintfW(msg, L"锁屏密码已重置！\n解锁模式：%s", ModeName(newMode));
+        MessageBoxW(wnd, msg, APP_NAME, MB_OK | MB_ICONINFORMATION);
         SetWindowTextW(g_hSupNew1, L""); SetWindowTextW(g_hSupNew2, L"");
     } else
         MessageBoxW(wnd, L"写入失败", APP_NAME, MB_ICONERROR);
@@ -1094,23 +1129,51 @@ static void DoChangePassword(HWND wnd)
         Sha256Hex(old, ihex);
         if (_wcsicmp(ihex, ohex) != 0) { MessageBoxW(wnd, L"旧密码错误！", APP_NAME, MB_ICONWARNING); return; }
     }
-    const WCHAR *err = ModeCheckInput(g_state.mode, nw1);
-    if (err) { MessageBoxW(wnd, err, APP_NAME, MB_ICONWARNING); return; }
+    /* v2.1.1：模式随新密码自动切换，不再需要手动点"应用模式"，杜绝不匹配锁死 */
+    int newMode = DetectMode(nw1);
+    int oldMode = g_state.mode;
     WCHAR hex[65];
     if (Sha256Hex(nw1, hex) && SavePasswordHash(hex)) {
-        MessageBoxW(wnd, L"密码修改成功！", APP_NAME, MB_OK | MB_ICONINFORMATION);
+        g_state.mode = newMode;
+        SaveState();
+        wchar_t msg[192];
+        if (newMode != oldMode)
+            wsprintfW(msg, L"密码修改成功！\n解锁模式已自动切换为：%s", ModeName(newMode));
+        else
+            wsprintfW(msg, L"密码修改成功！（解锁模式：%s）", ModeName(newMode));
+        MessageBoxW(wnd, msg, APP_NAME, MB_OK | MB_ICONINFORMATION);
         SetWindowTextW(g_hOld, L""); SetWindowTextW(g_hNew, L""); SetWindowTextW(g_hNew2, L"");
     } else
-        MessageBoxW(wnd, L"写入密码文件失败", APP_NAME, MB_ICONERROR);
+        MessageBoxW(wnd, L"写入密码文件失败（已自动校验，文件不会被损坏）", APP_NAME, MB_ICONERROR);
 }
 
 static void DoSaveMode(HWND wnd)
 {
     int sel = (int)SendMessageW(g_hModeCombo, CB_GETCURSEL, 0, 0);
     if (sel < 0 || sel > 4) return;
+    if (sel == g_state.mode) return;
+    /* v2.1.1：切换模式需验证当前密码，且当前密码必须符合新模式，
+       防止"数字模式 + 字母密码"这种把自己锁死的组合 */
+    if (!VerifyPasswordDialog(wnd, L"切换解锁模式 · 请输入当前密码确认"))
+        return;
+    if (sel != 0) {
+        BOOL ok = TRUE;
+        for (const wchar_t *p = g_verifyBuf; *p; p++)
+            if (!ModeAllowChar(sel, *p)) { ok = FALSE; break; }
+        const WCHAR *err = ok ? ModeCheckInput(sel, g_verifyBuf) : NULL;
+        if (!ok || err) {
+            MessageBoxW(wnd,
+                L"当前密码不符合所选模式，切换后你将无法解锁！\n\n"
+                L"请先修改一个符合该模式的密码（修改密码时模式会自动跟随），\n"
+                L"或者选择与当前密码匹配的模式。",
+                APP_NAME, MB_OK | MB_ICONWARNING);
+            SendMessageW(g_hModeCombo, CB_SETCURSEL, g_state.mode, 0);
+            return;
+        }
+    }
     g_state.mode = sel;
     SaveState();
-    MessageBoxW(wnd, L"解锁模式已更新（立即生效）", APP_NAME, MB_OK | MB_ICONINFORMATION);
+    MessageBoxW(wnd, L"解锁模式已更新（已验证当前密码兼容，立即生效）", APP_NAME, MB_OK | MB_ICONINFORMATION);
 }
 
 static LRESULT CALLBACK SetupProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)

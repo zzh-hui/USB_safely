@@ -21,7 +21,7 @@
 #include <time.h>
 
 #define APP_NAME  L"USB_safely"
-#define APP_VER   L"V2.1.0"
+#define APP_VER   L"V2.1.1"
 #define REG_KEY   L"Software\\USBsafely"
 #define REG_UNINS L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\USBsafely"
 
@@ -255,7 +255,7 @@ static void DoInstall(HWND wnd)
     Log(wnd, L"[5/6] 写入注册表（卸载项）...\r\n");
     SetRegStr(HKEY_CURRENT_USER, REG_KEY, L"InstallPath", g_install);
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayName", APP_NAME L" U盘锁");
-    SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayVersion", L"2.1.0");
+    SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayVersion", L"2.1.1");
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"Publisher", L"APPLE_INT · Geek-Hub");
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayIcon", mainExe);
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"InstallLocation", g_install);
