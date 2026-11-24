@@ -21,7 +21,7 @@
 #include <time.h>
 
 #define APP_NAME  L"USB_safely"
-#define APP_VER   L"V2.0.1"
+#define APP_VER   L"V2.0.2"
 #define REG_KEY   L"Software\\USBsafely"
 #define REG_UNINS L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\USBsafely"
 
@@ -191,7 +191,7 @@ static void DoInstall(HWND wnd)
     Log(wnd, L"[5/6] 写入注册表（卸载项）...\r\n");
     SetRegStr(HKEY_CURRENT_USER, REG_KEY, L"InstallPath", g_install);
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayName", APP_NAME L" U盘锁");
-    SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayVersion", L"2.0.1");
+    SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayVersion", L"2.0.2");
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"Publisher", L"APPLE_INT · Geek-Hub");
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"DisplayIcon", mainExe);
     SetRegStr(HKEY_CURRENT_USER, REG_UNINS, L"InstallLocation", g_install);
@@ -252,12 +252,16 @@ static void DoUninstall(HWND wnd)
             L"再次确认：真的要卸载吗？\n（密码文件也会一并删除，卸载后需重新安装并设置密码）",
             APP_NAME" 卸载", MB_YESNO | MB_ICONWARNING) != IDYES) return;
 
-    SetWindowTextW(g_hLog, L"");
-    Log(wnd, L"[1/3] 删除注册表项...\r\n");
+    Log(wnd, L"[1/4] 结束后台主程序进程...\r\n");
+    /* 密码验证已通过 → 强制结束主程序，防止文件删掉后主程序卡在后台（v2.0.2） */
+    ShellExecuteW(wnd, L"open", L"taskkill.exe", L"/IM USBsafely.exe /F", NULL, SW_HIDE);
+    Sleep(1000);
+
+    Log(wnd, L"[2/4] 删除注册表项...\r\n");
     RegDeleteTreeW(HKEY_CURRENT_USER, REG_KEY);
     RegDeleteTreeW(HKEY_CURRENT_USER, REG_UNINS);
 
-    Log(wnd, L"[2/3] 删除程序文件...\r\n");
+    Log(wnd, L"[3/4] 删除程序文件...\r\n");
     /* 先删数据与主程序（保留卸载器自身最后删） */
     wchar_t tmp[MAX_PATH];
     wsprintfW(tmp, L"%s\\password", g_install);
@@ -273,7 +277,7 @@ static void DoUninstall(HWND wnd)
     wsprintfW(tmp, L"%s\\autorun.inf", g_install);     DeleteFileW(tmp);
     wsprintfW(tmp, L"%s\\USBsafely-Setup.exe", g_install);
 
-    Log(wnd, L"[3/3] 清理完成，卸载器自删除...\r\n");
+    Log(wnd, L"[4/4] 清理完成，卸载器自删除...\r\n");
     MessageBoxW(wnd, L"✔ 卸载完成，所有文件与注册表已清理干净。", APP_NAME, MB_OK | MB_ICONINFORMATION);
     ShellExecuteW(wnd, L"open", L"cmd.exe", delCmd, NULL, SW_HIDE);
     ExitProcess(0);

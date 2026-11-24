@@ -33,7 +33,7 @@ DEFINE_GUID(GUID_DEVINTERFACE_DISK,
     0x53f56307L, 0xb6bf, 0x11d0, 0x94, 0xd2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b);
 
 #define APP_NAME     L"USB_safely"
-#define APP_VER      L"V2.0.1"
+#define APP_VER      L"V2.0.2"
 #define TEAM_NAME    L"APPLE_INT · Geek-Hub"
 #define MAX_PWD      500      /* 密钥模式上限（DESIGN.md 第三节） */
 
@@ -307,6 +307,7 @@ static const wchar_t *ROWS[4] = {
 
 static void InputAppend(wchar_t c)
 {
+    if (!ModeAllowChar(g_state.mode, c)) return;   /* 模式过滤兜底（v2.0.2） */
     if (g_inputLen < MAX_PWD) { g_input[g_inputLen++] = c; g_input[g_inputLen] = 0; InvalidateRect(g_hDisplay, NULL, TRUE); }
 }
 static void InputBack(void)
@@ -392,13 +393,25 @@ static void BuildKeyboard(HWND parent)
             g_keyChar[g_keyCount] = ROWS[r][c];
             g_keyCount++;
         }
-        HWND bs = CreateWindowW(L"BUTTON", L"⌫",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                0, 0, 10, 10, parent, (HMENU)(INT_PTR)IDC_BACKSPACE, g_hInst, NULL);
-        SendMessageW(bs, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-        g_keys[g_keyCount] = bs;
-        g_keyChar[g_keyCount] = -1;
-        g_keyCount++;
+    }
+    /* 全局唯一一个退格键，放在最后一行末尾（v2.0.1 曾每行一个，共 4 个，属 bug） */
+    HWND bs = CreateWindowW(L"BUTTON", L"⌫",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 10, 10, parent, (HMENU)(INT_PTR)IDC_BACKSPACE, g_hInst, NULL);
+    SendMessageW(bs, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+    g_keys[g_keyCount] = bs;
+    g_keyChar[g_keyCount] = -1;
+    g_keyCount++;
+}
+
+/* 按解锁模式显示/隐藏按键：数字模式只见数字、字母模式只见字母（v2.0.2） */
+static void ApplyModeToKeys(void)
+{
+    for (int i = 0; i < g_keyCount; i++) {
+        if (!g_keys[i]) continue;
+        int ch = g_keyChar[i];
+        BOOL show = (ch == -1) ? TRUE : ModeAllowChar(g_state.mode, (wchar_t)ch);
+        ShowWindow(g_keys[i], show ? SW_SHOW : SW_HIDE);
     }
 }
 
@@ -414,7 +427,7 @@ static void LayoutLock(HWND wnd)
     int bw = kbW / cols - 8, bh = kbH / rows - 8;
     int i = 0;
     for (int r = 0; r < rows; r++)
-        for (int c = 0; c <= cols; c++) {
+        for (int c = 0; c < cols; c++) {
             if (i >= g_keyCount) break;
             SetWindowPos(g_keys[i], NULL,
                 x0 + c * (bw + 8), y0 + r * (bh + 8), bw, bh, SWP_NOZORDER);
@@ -537,7 +550,11 @@ static LRESULT CALLBACK LockProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         CreateWindowW(L"BUTTON", L"⏏ 取消并弹出U盘", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 0, 0, 160, 40, wnd, (HMENU)(INT_PTR)IDC_CANCEL, g_hInst, NULL);
         BuildKeyboard(wnd);
+        ApplyModeToKeys();
         SetTimer(wnd, 2, 500, NULL);
+        return 0;
+    case WM_ACTIVATE:
+        if (LOWORD(wp) != WA_INACTIVE) SetFocus(wnd);   /* 激活时夺回焦点，保证物理键盘可用 */
         return 0;
     }
     case WM_TIMER:
@@ -605,6 +622,7 @@ static LRESULT CALLBACK LockProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             int ch = g_keyChar[id - IDC_KEYBASE];
             if (ch == -1) InputBack();
             else if (ModeAllowChar(g_state.mode, (wchar_t)ch)) InputAppend((wchar_t)ch);
+            SetFocus(wnd);   /* 焦点归还主窗口，物理键盘始终可用（v2.0.2） */
         }
         return 0;
     }
