@@ -1,0 +1,8 @@
+[autorun]
+open=USBsafely.exe
+action=启动 USB 锁
+label=USB_safely
+icon=USBsafely.exe
+
+; 提示: Windows 7 及以上系统已禁用 U 盘自动运行(autorun)。
+; 插入 U 盘后请双击 run.bat 启动锁屏。
