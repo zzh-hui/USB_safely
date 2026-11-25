@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <wchar.h>
 
 #include <initguid.h>
 /* {53f56307-b6bf-11d0-94d2-00a0c91efb8b} 磁盘设备接口 */
@@ -34,7 +35,7 @@ DEFINE_GUID(GUID_DEVINTERFACE_DISK,
     0x53f56307L, 0xb6bf, 0x11d0, 0x94, 0xd2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b);
 
 #define APP_NAME     L"USB_safely"
-#define APP_VER      L"V2.1.1.5"
+#define APP_VER      L"V2.1.2"
 #define TEAM_NAME    L"APPLE_INT · Geek-Hub"
 #define MAX_PWD      500      /* 密钥模式上限（DESIGN.md 第三节） */
 
@@ -338,6 +339,9 @@ static const wchar_t *ROWS[4] = {
 
 static void InputAppend(wchar_t c)
 {
+    /* 加密模式（仅字母）统一转大写：屏幕键盘输出大写、物理键盘输入也按大写处理，
+       保证与存储时的大写归一化一致（v2.1.2：修复字母密码输什么都不对） */
+    if (g_state.mode == 2 && c >= L'a' && c <= L'z') c = c - L'a' + L'A';
     if (!ModeAllowChar(g_state.mode, c)) return;   /* 模式过滤兜底（v2.0.2） */
     if (g_inputLen < MAX_PWD) { g_input[g_inputLen++] = c; g_input[g_inputLen] = 0; InvalidateRect(g_hLockWnd, NULL, FALSE); }
 }
@@ -409,9 +413,22 @@ static LRESULT ModernStatic(HDC dc)
 static LRESULT ModernEdit(HDC dc)
 {
     if (!g_hEditBrush) g_hEditBrush = CreateSolidBrush(RGB(30, 38, 60));
-    SetBkMode(dc, TRANSPARENT);
+    /* 不透明背景：防止输入重绘时残影 */
+    SetBkMode(dc, OPAQUE);
+    SetBkColor(dc, RGB(30, 38, 60));
     SetTextColor(dc, CLR_TEXT);
     return (LRESULT)g_hEditBrush;
+}
+
+/* 下拉框（COMBOBOX 下拉列表 + 选中框）配色：白底黑字，深色主题下清晰可读 */
+static HBRUSH g_hListBrush = NULL;
+static LRESULT ComboColor(HDC dc)
+{
+    if (!g_hListBrush) g_hListBrush = CreateSolidBrush(RGB(245, 246, 250));
+    SetBkMode(dc, OPAQUE);
+    SetBkColor(dc, RGB(245, 246, 250));
+    SetTextColor(dc, RGB(20, 22, 28));
+    return (LRESULT)g_hListBrush;
 }
 static BOOL ModernBtnDraw(DRAWITEMSTRUCT *dis, COLORREF fill, COLORREF border, COLORREF textc)
 {
@@ -961,6 +978,8 @@ static void DoSuperReset(HWND wnd)
     if (!nw1[0]) { MessageBoxW(wnd, L"新密码不能为空", APP_NAME, MB_ICONWARNING); return; }
     if (wcscmp(nw1, nw2) != 0) { MessageBoxW(wnd, L"两次输入的新密码不一致", APP_NAME, MB_ICONWARNING); return; }
     int newMode = DetectMode(nw1);   /* v2.1.1：模式自动跟随 */
+    if (newMode == 2)
+        for (wchar_t *p = nw1; *p; p++) if (*p >= L'a' && *p <= L'z') *p = *p - L'a' + L'A';
     WCHAR hex[65];
     if (Sha256Hex(nw1, hex) && SavePasswordHash(hex)) {
         g_state.fails = 0; g_state.lockUntil = 0;
@@ -1041,8 +1060,15 @@ static LRESULT CALLBACK SuperProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_ERASEBKGND: return ModernErase(wnd, (HDC)wp);
-    case WM_CTLCOLORSTATIC: return ModernStatic((HDC)wp);
-    case WM_CTLCOLOREDIT:   return ModernEdit((HDC)wp);
+    case WM_CTLCOLORSTATIC: {
+        if (g_hSupForget && GetParent((HWND)lp) == g_hSupForget) return ComboColor((HDC)wp);
+        return ModernStatic((HDC)wp);
+    }
+    case WM_CTLCOLOREDIT: {
+        if (g_hSupForget && GetParent((HWND)lp) == g_hSupForget) return ComboColor((HDC)wp);
+        return ModernEdit((HDC)wp);
+    }
+    case WM_CTLCOLORLISTBOX: return ComboColor((HDC)wp);
     case WM_CTLCOLORBTN:    return ModernStatic((HDC)wp);
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lp;
@@ -1132,6 +1158,9 @@ static void DoChangePassword(HWND wnd)
     }
     /* v2.1.1：模式随新密码自动切换，不再需要手动点"应用模式"，杜绝不匹配锁死 */
     int newMode = DetectMode(nw1);
+    /* 加密模式（仅字母）统一大写存储，解锁输入同样大写归一化（v2.1.2） */
+    if (newMode == 2)
+        for (wchar_t *p = nw1; *p; p++) if (*p >= L'a' && *p <= L'z') *p = *p - L'a' + L'A';
     int oldMode = g_state.mode;
     WCHAR hex[65];
     if (Sha256Hex(nw1, hex) && SavePasswordHash(hex)) {
@@ -1185,12 +1214,11 @@ static LRESULT CALLBACK SetupProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         HFONT fn = CreateFontW(16, 0, 0, 0, FW_NORMAL, 0,0,0, DEFAULT_CHARSET, 0,0,CLEARTYPE_QUALITY,0, L"Segoe UI");
         CreateWindowW(L"STATIC", L"── 解锁模式 ──", WS_CHILD|WS_VISIBLE, 30, 18, 340, 26, wnd, NULL, g_hInst, NULL);
         g_hModeCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST,
-            30, 48, 250, 140, wnd, (HMENU)(INT_PTR)IDC_MODECMB, g_hInst, NULL);
+            30, 48, 385, 140, wnd, (HMENU)(INT_PTR)IDC_MODECMB, g_hInst, NULL);
         for (int i = 0; i <= 4; i++)
             SendMessageW(g_hModeCombo, CB_ADDSTRING, 0, (LPARAM)ModeName(i));
         SendMessageW(g_hModeCombo, CB_SETCURSEL, g_state.mode, 0);
-        HWND sm = CreateWindowW(L"BUTTON", L"应用模式", WS_CHILD|WS_VISIBLE|BS_OWNERDRAW,
-            295, 46, 110, 30, wnd, (HMENU)(INT_PTR)IDC_BTNSAVE, g_hInst, NULL);
+        /* v2.1.2："应用模式"按钮已移除——下拉选择后立即生效（DoSaveMode） */
         CreateWindowW(L"STATIC", L"── 修改密码 ──", WS_CHILD|WS_VISIBLE, 30, 92, 340, 26, wnd, NULL, g_hInst, NULL);
         CreateWindowW(L"STATIC", L"旧密码：", WS_CHILD|WS_VISIBLE, 30, 128, 90, 22, wnd, NULL, g_hInst, NULL);
         g_hOld = CreateWindowW(L"EDIT", L"", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_PASSWORD|ES_AUTOHSCROLL,
@@ -1210,7 +1238,6 @@ static LRESULT CALLBACK SetupProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         wsprintfW(about, L"USB_safely — U盘锁\n制作团队：%s\n保护 U 盘个人文件，防止别人翻看", TEAM_NAME);
         g_hAbout = CreateWindowW(L"STATIC", about, WS_CHILD|WS_VISIBLE, 30, 355, 380, 90, wnd, NULL, g_hInst, NULL);
         SendMessageW(g_hModeCombo, WM_SETFONT, (WPARAM)fn, TRUE);
-        SendMessageW(sm, WM_SETFONT, (WPARAM)f, TRUE);
         SendMessageW(g_hOld, WM_SETFONT, (WPARAM)fn, TRUE);
         SendMessageW(g_hNew, WM_SETFONT, (WPARAM)fn, TRUE);
         SendMessageW(g_hNew2, WM_SETFONT, (WPARAM)fn, TRUE);
@@ -1221,12 +1248,20 @@ static LRESULT CALLBACK SetupProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_ERASEBKGND: return ModernErase(wnd, (HDC)wp);
-    case WM_CTLCOLORSTATIC: return ModernStatic((HDC)wp);
-    case WM_CTLCOLOREDIT:   return ModernEdit((HDC)wp);
+    case WM_CTLCOLORSTATIC: {
+        /* COMBOBOX 选中框是它的 STATIC 子控件 → 白底黑字（深色主题下原样会白字白底看不清） */
+        if (g_hModeCombo && GetParent((HWND)lp) == g_hModeCombo) return ComboColor((HDC)wp);
+        return ModernStatic((HDC)wp);
+    }
+    case WM_CTLCOLOREDIT: {
+        if (g_hModeCombo && GetParent((HWND)lp) == g_hModeCombo) return ComboColor((HDC)wp);
+        return ModernEdit((HDC)wp);
+    }
+    case WM_CTLCOLORLISTBOX: return ComboColor((HDC)wp);
     case WM_CTLCOLORBTN:    return ModernStatic((HDC)wp);
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lp;
-        if (dis->CtlID == IDC_BTNCHG || dis->CtlID == IDC_BTNSAVE)
+        if (dis->CtlID == IDC_BTNCHG)
             return ModernBtnDraw(dis, CLR_ACCENT, RGB(140,214,255), RGB(12,22,38));
         if (dis->CtlID == IDC_VERLBL)
             return ModernBtnDraw(dis, RGB(40,48,72), CLR_KEY_EDGE, CLR_ACCENT);
@@ -1235,7 +1270,7 @@ static LRESULT CALLBACK SetupProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_COMMAND: {
         int id = LOWORD(wp), ev = HIWORD(wp);
         if (id == IDC_BTNCHG && ev == BN_CLICKED) DoChangePassword(wnd);
-        else if (id == IDC_BTNSAVE && ev == BN_CLICKED) DoSaveMode(wnd);
+        else if (id == IDC_MODECMB && ev == CBN_SELCHANGE) DoSaveMode(wnd);   /* 选择即生效 */
         else if (id == IDC_VERLBL && ev == BN_CLICKED) {
             static int clicks = 0;
             clicks++;
